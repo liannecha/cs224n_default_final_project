@@ -82,7 +82,9 @@ class SonnetGPT(nn.Module):
     """
     token_ids = encoding.to(self.get_device())
     attention_mask = torch.ones(token_ids.shape, dtype=torch.int64).to(self.get_device())
-
+    prompt_len = token_ids.shape[1]  # remember where prompt ends
+    newline_id = self.tokenizer.encode('\n')[0]
+    newlines_generated = 0
 
     for _ in range(max_length):
       # Forward pass to get logits
@@ -115,7 +117,14 @@ class SonnetGPT(nn.Module):
         [attention_mask, torch.ones((1, 1), dtype=torch.int64).to(self.get_device())], dim=1
       )
 
-    generated_output = self.tokenizer.decode(token_ids[0].cpu().numpy().tolist())[3:]
+      # stop after ~11 new lines (sonnet = 14 lines, prompt has 3)
+      if sampled_token.item() == newline_id:
+        newlines_generated += 1
+        if newlines_generated >= 11:
+          break
+
+    # decode only the generated continuation, not the prompt
+    generated_output = self.tokenizer.decode(token_ids[0, prompt_len:].cpu().tolist())
     return token_ids, generated_output
 
 

@@ -196,6 +196,7 @@ def test(args):
   device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
   saved = torch.load(args.filepath)
 
+
   model = ParaphraseGPT(saved['args'])
   model.load_state_dict(saved['model'])
   model = model.to(device)
