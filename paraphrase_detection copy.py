@@ -53,23 +53,10 @@ class ParaphraseGPT(nn.Module):
     self.gpt = GPT2Model.from_pretrained(model=args.model_size, d=args.d, l=args.l, num_heads=args.num_heads)
     self.paraphrase_detection_head = nn.Linear(args.d, 2)  # Paraphrase detection has two outputs: 1 (yes) or 0 (no).
 
+    # By default, fine-tune the full model.
+    for param in self.gpt.parameters():
+      param.requires_grad = True
 
-    """ lianne's edits start """
-    # add dropout and head type to args
-    self.dropout = nn.Dropout(args.hidden_dropout_prob)
-    self.paraphrase_head_type = args.paraphrase_head_type
-
-    # don't update GPT-2 weights if we're only fine-tuning the last linear layer
-    if args.fine_tune_mode == 'last-linear-layer':
-      for param in self.gpt.parameters():
-        param.requires_grad = False
-    # default option: fine-tune the full model
-    else:
-      for param in self.gpt.parameters():
-        param.requires_grad = True
-    """ lianne's edits end """
-
- 
   def forward(self, input_ids, attention_mask):
     """
     TODO: Predict the label of the token using the paraphrase_detection_head Linear layer.
@@ -84,28 +71,20 @@ class ParaphraseGPT(nn.Module):
     """
 
     'Takes a batch of sentences and produces embeddings for them.'
-    # get hidden states from GPT-2
+    # run input through GPT-2 transformer stack
     gpt_output = self.gpt(input_ids, attention_mask)
 
-    # grab the hidden state of the last token (used to make yes/no prediction)
+    # grab the last non-padding token — this is the "prediction position"
+    # i.e. the model should output yes/no here in cloze style
     last_token_hidden = gpt_output['last_token']
 
-    # cloze head: convert last token hidden state to scores for each token in vocab
-    if self.paraphrase_head_type == 'cloze':
-      vocab_logits = self.gpt.hidden_state_to_token(last_token_hidden)
-      # extract the logits for "yes" and "no" tokens to make the prediction
-      no_logit  = vocab_logits[:, 3919]
-      yes_logit = vocab_logits[:, 8505]
-      logits = torch.stack([no_logit, yes_logit], dim=1)
-    # classifier head: directly convert last token hidden state to yes/no logits
-    else:
-      last_token_hidden = self.dropout(last_token_hidden)
-      logits = self.paraphrase_detection_head(last_token_hidden)
+    # project to full vocab logits; argmax will give token id 8505 (yes) or 3919 (no)
+    logits = self.paraphrase_detection_head(last_token_hidden)
 
     return logits
 
 
-# given
+
 def save_model(model, optimizer, args, filepath):
   save_info = {
     'model': model.state_dict(),
@@ -120,19 +99,12 @@ def save_model(model, optimizer, args, filepath):
   print(f"save the model to {filepath}")
 
 
-# given
 def train(args):
   """Train GPT-2 for paraphrase detection on the Quora dataset."""
   device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
   # Create the data and its corresponding datasets and dataloader.
-  # para_train_data = load_paraphrase_data(args.para_train)
-  # para_dev_data = load_paraphrase_data(args.para_dev)
-
-  """ lianne's edits start """
-  # my computer can't handle running the full dataset
-  para_train_data = load_paraphrase_data(args.para_train)[:10000]
-  para_dev_data = load_paraphrase_data(args.para_dev)[:2000]
-  """ lianne's edits end """
+  para_train_data = load_paraphrase_data(args.para_train)
+  para_dev_data = load_paraphrase_data(args.para_dev)
 
   para_train_data = ParaphraseDetectionDataset(para_train_data, args)
   para_dev_data = ParaphraseDetectionDataset(para_dev_data, args)
@@ -162,11 +134,6 @@ def train(args):
       b_mask = b_mask.to(device)
       labels = labels.to(device)
 
-      """ lianne's edits start """
-      # convert labels to 0/1
-      labels = (labels == 8505).long()
-      """ lianne's edits end """
-
       # Compute the loss, gradients, and update the model's parameters.
       optimizer.zero_grad()
       logits = model(b_ids, b_mask)
@@ -182,18 +149,11 @@ def train(args):
 
     dev_acc, dev_f1, *_ = model_eval_paraphrase(para_dev_dataloader, model, device)
 
-    # print both acc and f1
-    print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, dev acc :: {dev_acc :.3f}, dev f1 :: {dev_f1 :.3f}")
-
     if dev_acc > best_dev_acc:
       best_dev_acc = dev_acc
       save_model(model, optimizer, args, args.filepath)
-    else:
-      epochs_no_improve += 1
-      # early stopping check
-      if args.patience > 0 and epochs_no_improve >= args.patience:
-        print(f"Early stopping: no improvement for {args.patience} epochs.")
-        break
+
+    print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, dev acc :: {dev_acc :.3f}")
 
 
 @torch.no_grad()
@@ -219,33 +179,19 @@ def test(args):
   para_test_dataloader = DataLoader(para_test_data, shuffle=True, batch_size=args.batch_size,
                                     collate_fn=para_test_data.collate_fn)
 
-  dev_para_acc, dev_para_f1, dev_para_y_pred, dev_para_y_true, dev_para_sent_ids = model_eval_paraphrase(para_dev_dataloader, model, device)
-  print(f"dev paraphrase acc :: {dev_para_acc :.3f}, dev paraphrase f1 :: {dev_para_f1 :.3f}")
+  dev_para_acc, _, dev_para_y_pred, _, dev_para_sent_ids = model_eval_paraphrase(para_dev_dataloader, model, device)
+  print(f"dev paraphrase acc :: {dev_para_acc :.3f}")
   test_para_y_pred, test_para_sent_ids = model_test_paraphrase(para_test_dataloader, model, device)
 
-  # write dev predictions
   with open(args.para_dev_out, "w+") as f:
-    f.write("id,Predicted_Is_Paraphrase\n")
+    f.write(f"id \t Predicted_Is_Paraphrase \n")
     for p, s in zip(dev_para_sent_ids, dev_para_y_pred):
-      f.write(f"{p},{s}\n")
+      f.write(f"{p}, {s} \n")
 
-  # write test predictions
   with open(args.para_test_out, "w+") as f:
-    f.write("id,Predicted_Is_Paraphrase\n")
+    f.write(f"id \t Predicted_Is_Paraphrase \n")
     for p, s in zip(test_para_sent_ids, test_para_y_pred):
-      f.write(f"{p},{s}\n")
-
-  # optional: save misclassified dev examples for error analysis
-  if args.error_analysis_out:
-    raw_dev = load_paraphrase_data(args.para_dev)
-    id_to_example = {ex[0]: ex for ex in raw_dev}
-    with open(args.error_analysis_out, "w+") as f:
-      f.write("id,sentence1,sentence2,gold_label,predicted_label\n")
-      for sid, pred, gold in zip(dev_para_sent_ids, dev_para_y_pred, dev_para_y_true):
-        if pred != gold and sid in id_to_example:
-          ex = id_to_example[sid]
-          f.write(f"{sid},{ex[1]},{ex[2]},{gold},{pred}\n")
-    print(f"error analysis saved to {args.error_analysis_out}")
+      f.write(f"{p}, {s} \n")
 
 
 def get_args():
@@ -266,27 +212,6 @@ def get_args():
   parser.add_argument("--model_size", type=str,
                       help="The model size as specified on hugging face. DO NOT use the xl model.",
                       choices=['gpt2', 'gpt2-medium', 'gpt2-large'], default='gpt2')
-
-  # full model vs frozen GPT-2
-  parser.add_argument("--fine_tune_mode", type=str,
-                      choices=['full-model', 'last-linear-layer'], default='full-model')
-
-  # dropout on last hidden state
-  parser.add_argument("--hidden_dropout_prob", type=float, default=0.1)
-
-  # epoch-level logging
-  parser.add_argument("--logfile", type=str, default=None,
-                      help="append epoch,train_loss,dev_acc,dev_f1 rows here")
-
-  # early stopping (0 = off)
-  parser.add_argument("--patience", type=int, default=0)
-
-  # classifier head vs cloze-style extraction
-  parser.add_argument("--paraphrase_head_type", type=str,
-                      choices=['classifier', 'cloze'], default='classifier')
-
-  # error analysis output
-  parser.add_argument("--error_analysis_out", type=str, default=None)
 
   args = parser.parse_args()
   return args
@@ -313,8 +238,7 @@ def add_arguments(args):
 
 if __name__ == "__main__":
   args = get_args()
-  # descriptive checkpoint name: model, mode, epochs, lr
-  args.filepath = f'paraphrase-{args.model_size}-{args.fine_tune_mode}-{args.epochs}e-{args.lr}.pt'
+  args.filepath = f'{args.epochs}-{args.lr}-paraphrase.pt'  # Save path.
   seed_everything(args.seed)  # Fix the seed for reproducibility.
   train(args)
   test(args)

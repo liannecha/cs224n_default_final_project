@@ -33,6 +33,8 @@ def model_eval_paraphrase(dataloader, model, device):
     logits = model(b_ids, b_mask).cpu().numpy()
     preds = np.argmax(logits, axis=1).flatten()
 
+    # remap token ids (8505="yes", 3919="no") to class indices (1/0)
+    labels = (labels == 8505).long()
     y_true.extend(labels)
     y_pred.extend(preds)
     sent_ids.extend(b_sent_ids)
